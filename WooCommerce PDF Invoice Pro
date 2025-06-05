@@ -1,0 +1,249 @@
+<?php
+/*
+Plugin Name: WooCommerce PDF Invoice Pro
+Description: Génère et envoie des factures PDF professionnelles aux clients après commande.
+Version: 2.0
+Author: Aimé SAWADOGO
+*/
+
+if (!defined('ABSPATH')) exit;
+
+
+// Inclure TCPDF
+require_once __DIR__ . '/tcpdf/tcpdf.php'; 
+
+// Créer le dossier "invoices" si inexistant
+if (!file_exists(__DIR__ . '/invoices')) {
+    mkdir(__DIR__ . '/invoices', 0755, true);
+}
+
+// Récupérer les infos de l'entreprise/vendeur
+function get_seller_info($order) {
+    $seller_info = array();
+    
+    // 1. Infos de base WooCommerce
+    $seller_info['name'] = get_bloginfo('name');
+    $seller_info['address'] = get_option('woocommerce_store_address');
+    $seller_info['city'] = get_option('woocommerce_store_city');
+    $seller_info['postcode'] = get_option('woocommerce_store_postcode');
+    $seller_info['country'] = WC()->countries->countries[get_option('woocommerce_default_country')];
+    $seller_info['email'] = get_option('woocommerce_email_from_address');
+    $seller_info['phone'] = get_option('woocommerce_store_phone');
+    $seller_info['logo'] = get_option('woocommerce_email_header_image');
+    
+    // 2. Si marketplace (Dokan/WCFM etc.)
+    foreach ($order->get_items() as $item) {
+        $product = $item->get_product();
+        $author_id = $product->get_post_data()->post_author;
+        
+        if ($author_id != 1) {
+            $seller_info['name'] = get_the_author_meta('display_name', $author_id);
+            $seller_info['address'] = get_user_meta($author_id, '_vendor_address', true);
+            $seller_info['email'] = get_the_author_meta('user_email', $author_id);
+            $seller_info['logo'] = get_user_meta($author_id, 'dokan_store_logo', true);
+            break;
+        }
+    }
+    
+    return $seller_info;
+}
+
+// Générer le PDF avec TCPDF
+function generate_pdf_invoice($order_id) {
+    $order = wc_get_order($order_id);
+    $seller = get_seller_info($order);
+    $invoice_number = 'INV-' . $order_id . '-' . date('Ymd');
+    $filename = 'facture-' . $invoice_number . '.pdf';
+
+    // Créer un nouveau PDF
+    $pdf = new TCPDF('P', 'mm', 'A4', true, 'UTF-8', false);
+    
+    // Configuration du document
+    $pdf->SetCreator('WooCommerce');
+    $pdf->SetAuthor($seller['name']);
+    $pdf->SetTitle('Facture ' . $invoice_number);
+    $pdf->SetMargins(15, 25, 15);
+    $pdf->SetHeaderMargin(5);
+    $pdf->SetFooterMargin(15);
+    $pdf->SetAutoPageBreak(true, 25);
+    $pdf->AddPage();
+
+    // Couleurs personnalisées
+    $primary_color = '#2c3e50';
+    $secondary_color = '#7f8c8d';
+    $border_color = '#e0e0e0';
+
+    // En-tête de facture (haut de page)
+    $header = '
+    <div style="text-align:right; margin-bottom:20px;">
+        <h1 style="color:'.$primary_color.'; font-size:24px; margin:0;">FACTURE</h1>
+        <p style="color:'.$secondary_color.'; margin:5px 0 0 0;">
+            <strong>N°:</strong> '.$invoice_number.'<br/>
+            <strong>Date:</strong> '.$order->get_date_created()->format('d/m/Y H:i').'
+        </p>
+    </div>';
+
+    // Logo et infos vendeur
+    $seller_html = '
+    <table cellpadding="5" style="margin-bottom:20px;">
+        <tr>
+            <td width="40%" style="vertical-align:top;">';
+    
+    if (!empty($seller['logo'])) {
+        $seller_html .= '<img src="'.$seller['logo'].'" style="max-height:80px;"/>';
+    } else {
+        $seller_html .= '<h2 style="color:'.$primary_color.'; margin:0;">'.$seller['name'].'</h2>';
+    }
+    
+    $seller_html .= '
+            </td>
+            <td width="60%" style="border-left:1px solid '.$border_color.'; padding-left:10px;">
+                <p style="margin:0; color:'.$secondary_color.';">
+                    '.nl2br($seller['address']).'<br/>
+                    '.$seller['postcode'].' '.$seller['city'].'<br/>
+                    '.$seller['country'].'<br/><br/>
+                    <strong>Email:</strong> '.$seller['email'].'<br/>
+                    '.($seller['phone'] ? '<strong>Tél:</strong> '.$seller['phone'] : '').'
+                </p>
+            </td>
+        </tr>
+    </table>';
+
+    // Infos client
+    $client_html = '
+    <div style="border:1px solid '.$border_color.'; padding:10px; background-color:#f9f9f9; margin-bottom:20px;">
+        <h3 style="color:'.$primary_color.'; margin:0 0 10px 0;">Client</h3>
+        <p style="margin:0; color:'.$secondary_color.';">
+            <strong>'.$order->get_billing_first_name().' '.$order->get_billing_last_name().'</strong><br/>
+            '.$order->get_billing_address_1().'<br/>
+            '.$order->get_billing_postcode().' '.$order->get_billing_city().'<br/>
+            '.WC()->countries->countries[$order->get_billing_country()].'<br/><br/>
+            <strong>Email:</strong> '.$order->get_billing_email().'<br/>
+            '.($order->get_billing_phone() ? '<strong>Tél:</strong> '.$order->get_billing_phone() : '').'
+        </p>
+    </div>';
+
+    // Détails de la commande
+    $items_html = '
+    <h3 style="color:'.$primary_color.'; border-bottom:1px solid '.$border_color.'; padding-bottom:5px;">Détails de la commande</h3>
+    <table border="0" cellpadding="8" style="width:100%; border-collapse:collapse;">
+        <thead>
+            <tr style="background-color:'.$primary_color.'; color:#fff;">
+                <th style="text-align:left; width:60%;">Produit</th>
+                <th style="text-align:center; width:15%;">Qté</th>
+                <th style="text-align:right; width:25%;">Prix</th>
+            </tr>
+        </thead>
+        <tbody>';
+    
+    $items = $order->get_items();
+    $i = 0;
+    foreach ($items as $item) {
+        $product = $item->get_product();
+        $author_id = $product->get_post_data()->post_author;
+        $vendor_name = ($author_id != 1) ? '<br/><small style="color:'.$secondary_color.';">Vendeur: '.get_the_author_meta('display_name', $author_id).'</small>' : '';
+        
+        $row_color = ($i++ % 2) ? '#f9f9f9' : '#ffffff';
+        
+        $items_html .= '
+            <tr style="background-color:'.$row_color.';">
+                <td style="border-bottom:1px solid '.$border_color.';">'.$item->get_name().$vendor_name.'</td>
+                <td style="text-align:center; border-bottom:1px solid '.$border_color.';">'.$item->get_quantity().'</td>
+                <td style="text-align:right; border-bottom:1px solid '.$border_color.';">'.wc_price($item->get_total()).'</td>
+            </tr>';
+    }
+    
+    $items_html .= '
+        </tbody>
+    </table>';
+
+    // Totaux
+    $total_html = '
+    <table border="0" cellpadding="8" style="width:100%; margin-top:20px;">
+        <tr>
+            <td style="text-align:right; width:75%;"><strong>Sous-total:</strong></td>
+            <td style="text-align:right; width:25%;">'.wc_price($order->get_subtotal()).'</td>
+        </tr>';
+    
+    if ($order->get_shipping_total() > 0) {
+        $total_html .= '
+        <tr>
+            <td style="text-align:right;"><strong>Livraison:</strong></td>
+            <td style="text-align:right;">'.wc_price($order->get_shipping_total()).'</td>
+        </tr>';
+    }
+    
+    if ($order->get_total_tax() > 0) {
+        $total_html .= '
+        <tr>
+            <td style="text-align:right;"><strong>TVA:</strong></td>
+            <td style="text-align:right;">'.wc_price($order->get_total_tax()).'</td>
+        </tr>';
+    }
+    
+    $total_html .= '
+        <tr>
+            <td style="text-align:right; font-weight:bold; font-size:1.2em; color:'.$primary_color.';">Total:</td>
+            <td style="text-align:right; font-weight:bold; font-size:1.2em; color:'.$primary_color.';">'.wc_price($order->get_total()).'</td>
+        </tr>
+    </table>';
+
+    // Notes
+    $notes_html = '';
+    if ($order->get_customer_note()) {
+        $notes_html = '
+        <div style="margin-top:30px; padding:10px; background-color:#f9f9f9; border-left:4px solid '.$primary_color.';">
+            <h4 style="color:'.$primary_color.'; margin:0 0 5px 0;">Notes:</h4>
+            <p style="margin:0; color:'.$secondary_color.';">'.$order->get_customer_note().'</p>
+        </div>';
+    }
+
+    // Pied de page
+    $footer_html = '
+    <div style="margin-top:40px; padding-top:10px; border-top:1px solid '.$border_color.'; color:'.$secondary_color.'; font-size:0.9em;">
+        <p style="text-align:center; margin:0;">
+            '.$seller['name'].' - '.nl2br($seller['address']).' - '.$seller['postcode'].' '.$seller['city'].'<br/>
+            '.($seller['phone'] ? 'Tél: '.$seller['phone'].' - ' : '').'Email: '.$seller['email'].'
+        </p>
+    </div>';
+
+    // Assemblage du HTML
+    $html = $header.$seller_html.$client_html.$items_html.$total_html.$notes_html.$footer_html;
+
+    $pdf->writeHTML($html, true, false, true, false, '');
+    $pdf_path = __DIR__ . '/invoices/' . $filename;
+    $pdf->Output($pdf_path, 'F');
+
+    return $pdf_path;
+}
+
+// Envoyer le PDF par email après commande
+function send_pdf_invoice($order_id) {
+    $order = wc_get_order($order_id);
+    $pdf_path = generate_pdf_invoice($order_id);
+
+    $to = $order->get_billing_email();
+    $subject = 'Votre facture '.get_bloginfo('name').' - Commande #'.$order_id;
+    $body = '
+    <div style="font-family:Arial, sans-serif; max-width:600px; margin:0 auto;">
+        <div style="text-align:center; margin-bottom:20px;">
+            <img src="'.get_option('woocommerce_email_header_image').'" style="max-height:80px;"/>
+        </div>
+        <p>Bonjour '.$order->get_billing_first_name().',</p>
+        <p>Merci pour votre commande n°'.$order_id.'. Veuillez trouver ci-joint votre facture en PDF.</p>
+        <p>Pour toute question concernant votre commande, n\'hésitez pas à répondre à cet email.</p>
+        <div style="margin-top:30px; padding:15px; background-color:#f5f5f5; border-radius:5px;">
+            <h4 style="margin:0 0 10px 0;">Récapitulatif de commande</h4>
+            <p style="margin:0;">
+                <strong>Date:</strong> '.$order->get_date_created()->format('d/m/Y').'<br/>
+                <strong>Total:</strong> '.wc_price($order->get_total()).'
+            </p>
+        </div>
+        <p style="margin-top:30px;">Cordialement,<br/>L\'équipe '.get_bloginfo('name').'</p>
+    </div>';
+
+    $headers = array('Content-Type: text/html; charset=UTF-8');
+    wp_mail($to, $subject, $body, $headers, array($pdf_path));
+}
+
+add_action('woocommerce_order_status_completed', 'send_pdf_invoice', 10, 1);
